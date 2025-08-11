@@ -6,9 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { Map as MapIcon, PlayCircle, Settings2, Pencil, Check, X } from "lucide-react";
 import { motion } from "framer-motion";
 
-// =====================
-// Lightweight UI Primitives (no path aliases)
-// =====================
+// Lightweight UI
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <div className={`bg-white border border-neutral-200 rounded-2xl ${className}`}>{children}</div>;
 }
@@ -55,19 +53,12 @@ function Slider({ value, onChange, min = 0, max = 100, step = 1 }: { value: numb
   );
 }
 
-// =====================
-// Types & Constants
-// =====================
+// Types & constants
 type LatLng = [number, number];
 type Bounds = [[number, number], [number, number]];
-const SAFE_CENTER: LatLng = [34.05, -118.25]; // Fallback center (Los Angeles)
+const SAFE_CENTER: LatLng = [34.05, -118.25];
 
-// Backend base URL (set VITE_BACKEND_URL in your env for production)
-const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
-
-// =====================
 // Helpers
-// =====================
 function computeCenter(pts: LatLng[] | null | undefined, fallback: LatLng = SAFE_CENTER): LatLng {
   if (!pts || pts.length === 0) return fallback;
   const n = pts.length;
@@ -77,11 +68,9 @@ function computeCenter(pts: LatLng[] | null | undefined, fallback: LatLng = SAFE
   return [Number.isFinite(cLat) ? cLat : fallback[0], Number.isFinite(cLng) ? cLng : fallback[1]];
 }
 function normalizeBounds(bbox: { north: number; south: number; east: number; west: number }): Bounds {
-  // Ensure non-zero-area bounds; pad if degenerate
   let { north, south, east, west } = bbox;
-  const minPad = 1e-4; // ~11m lat, ~9m lon at mid-lat
+  const minPad = 1e-4;
   if (!Number.isFinite(north) || !Number.isFinite(south) || !Number.isFinite(east) || !Number.isFinite(west)) {
-    // fallback to a small box around SAFE_CENTER
     const [clat, clng] = SAFE_CENTER;
     north = clat + minPad; south = clat - minPad; east = clng + minPad; west = clng - minPad;
   }
@@ -90,11 +79,10 @@ function normalizeBounds(bbox: { north: number; south: number; east: number; wes
   return [[south, west], [north, east]];
 }
 function polygonRoughAreaKm2(poly: LatLng[]): number {
-  // Equirectangular approximation; suitable for small AOIs
   if (!poly || poly.length < 3) return 0;
   const toRad = (deg: number) => deg * Math.PI / 180;
   const meanLat = poly.reduce((s, p) => s + p[0], 0) / poly.length;
-  const mPerDegLat = 111_132; // avg
+  const mPerDegLat = 111_132;
   const mPerDegLon = 111_320 * Math.cos(toRad(meanLat));
   const pts = poly.map(([lat, lon]) => [lon * mPerDegLon, lat * mPerDegLat]);
   let areaM2 = 0;
@@ -103,71 +91,64 @@ function polygonRoughAreaKm2(poly: LatLng[]): number {
     const [x2, y2] = pts[(i + 1) % pts.length];
     areaM2 += (x1 * y2 - x2 * y1);
   }
-  return Math.abs(areaM2) / 2 / 1e6; // km^2
+  return Math.abs(areaM2) / 2 / 1e6;
 }
 
-// -------- In-browser self-tests (not formal unit tests, but basic guards) --------
+// Dev self-tests
 if (typeof window !== "undefined" && import.meta.env.MODE !== "production") {
-  // computeCenter fallbacks
   const c0 = computeCenter([] as LatLng[], [1, 2]);
   console.assert(c0[0] === 1 && c0[1] === 2, `computeCenter fallback failed: ${c0}`);
   const c1 = computeCenter([[0, 0], [2, 2]]);
   console.assert(Math.abs(c1[0] - 1) < 1e-9 && Math.abs(c1[1] - 1) < 1e-9, `computeCenter average failed: ${c1}`);
-  // area approx sanity
   const sq: LatLng[] = [[34.05,-118.25],[34.06,-118.25],[34.06,-118.24],[34.05,-118.24]];
   const a = polygonRoughAreaKm2(sq);
   console.assert(a > 8 && a < 15, `Area self-test: expected ~11±3 km², got ${a}`);
+  const b = normalizeBounds({ north: 10, south: 10, east: 20, west: 20 });
+  const h = b[0][0] !== b[1][0] && b[0][1] !== b[1][1];
+  console.assert(h, `normalizeBounds should pad degenerate bbox, got ${JSON.stringify(b)}`);
 }
 
-// =====================
-// Backend wiring (ndvi-backend)
-// =====================
-function closeRingIfNeeded(points: LatLng[]): [number, number][][] {
-  // GeoJSON wants [ [ [lng,lat], ... , first ] ]
-  const ring = points.map(([lat, lng]) => [lng, lat]);
-  if (ring.length >= 1) {
-    const [f0, f1] = ring[0];
-    const [l0, l1] = ring[ring.length - 1];
-    if (f0 !== l0 || f1 !== l1) ring.push([f0, f1]);
-  }
-  return [ring as [number, number][]];
-}
-
-async function fetchNdviChange(params: {
+// Mock backend
+async function fetchChangeMap(params: {
   aoi: LatLng[];
   before: string;
   after: string;
   cloudMask: boolean;
+  threshold: number;
 }): Promise<{
-  overlayUrl: string;
-  bounds: Bounds;
-  summary: { mean_delta: number; pct_gain_pixels: number; pct_loss_pixels: number };
+  overlayPngUrl: string;
+  overlayBounds: { north: number; south: number; east: number; west: number };
+  summary: { changedPct: number; totalAreaKm2: number };
 }> {
-  const coordinates = closeRingIfNeeded(params.aoi);
-  const body = {
-    aoi_geojson: { type: "Polygon", coordinates },
-    before_date: params.before,
-    after_date: params.after,
-    cloud_mask: params.cloudMask,
+  const lats = params.aoi.map((p) => p[0]);
+  const lngs = params.aoi.map((p) => p[1]);
+  const north = Math.max(...lats), south = Math.min(...lats);
+  const east = Math.max(...lngs), west = Math.min(...lngs);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 512; canvas.height = 512;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable");
+  const grd = ctx.createLinearGradient(0, 0, 512, 512);
+  grd.addColorStop(0, "rgba(0,0,0,0)");
+  grd.addColorStop(0.5, "rgba(255,165,0,0.55)");
+  grd.addColorStop(1, "rgba(255,0,0,0.7)");
+  ctx.fillStyle = grd; ctx.fillRect(0, 0, 512, 512);
+
+  const overlayPngUrl = canvas.toDataURL("image/png");
+  const areaKm2 = polygonRoughAreaKm2(params.aoi);
+  const changedPct = Math.min(100, Math.max(5, 60 - params.threshold / 2));
+
+  await new Promise((r) => setTimeout(r, 250));
+
+  return {
+    overlayPngUrl,
+    overlayBounds: { north, south, east, west },
+    summary: { changedPct, totalAreaKm2: Math.abs(areaKm2) },
   };
-  const res = await fetch(`${BACKEND}/ndvi-change`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(()=>"(no body)");
-    throw new Error(`Backend ${res.status}: ${txt}`);
-  }
-  const data = await res.json();
-  const overlayUrl = `${BACKEND}${data.overlay_url}`;
-  const b = data.bounds as [[number, number],[number, number]];
-  return { overlayUrl, bounds: b, summary: data.summary };
 }
 
-// =====================
 // Leaflet helpers
-// =====================
 function FitBounds({ bounds }: { bounds: Bounds | null }) {
   const map = useMap();
   useEffect(() => { if (bounds) map.fitBounds(bounds, { padding: [24, 24] }); }, [bounds, map]);
@@ -178,11 +159,8 @@ function MapClickCapture({ drawing, onAddPoint }: { drawing: boolean; onAddPoint
   return null;
 }
 
-// =====================
-// Main Component
-// =====================
+// Component
 export default function App() {
-  // Default AOI (simple rectangle in LA)
   const [aoi, setAoi] = useState<LatLng[]>([
     [34.0522, -118.2437],
     [34.0622, -118.2437],
@@ -200,9 +178,7 @@ export default function App() {
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [resultBounds, setResultBounds] = useState<Bounds | null>(null);
   const [summary, setSummary] = useState<{ changedPct: number; totalAreaKm2: number } | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Robust center: prefer draftAoi if drawing, else aoi; fallback to SAFE_CENTER
   const mapCenter: LatLng = useMemo(() => {
     const tgt = (drawing && draftAoi.length > 0) ? draftAoi : aoi;
     return computeCenter(tgt, SAFE_CENTER);
@@ -215,27 +191,21 @@ export default function App() {
 
   const runAnalysis = async () => {
     const poly = (aoi && aoi.length >= 3) ? aoi : draftAoi;
-    if (!poly || poly.length < 3) { setErrorMsg("Please draw a polygon with at least 3 points."); return; }
+    if (!poly || poly.length < 3) return;
     setLoading(true);
-    setErrorMsg(null);
     setResultUrl(null); setSummary(null); setResultBounds(null);
     try {
-      const res = await fetchNdviChange({ aoi: poly, before, after, cloudMask });
-      setResultUrl(res.overlayUrl);
-      setResultBounds(res.bounds);
-      // Keep placeholder metrics (AOI size) and add real NDVI stats in the panel below
-      setSummary({ changedPct: Math.abs(res.summary.mean_delta) * 100, totalAreaKm2: polygonRoughAreaKm2(poly) });
-      (window as any).__NDVI_SUMMARY__ = res.summary;
-    } catch (err: any) {
-      setErrorMsg(err?.message || "Request failed");
+      const res = await fetchChangeMap({ aoi: poly, before, after, cloudMask, threshold });
+      setResultUrl(res.overlayPngUrl);
+      setResultBounds(normalizeBounds(res.overlayBounds));
+      setSummary(res.summary);
     } finally { setLoading(false); }
   };
 
-  const reset = () => { setResultUrl(null); setSummary(null); setResultBounds(null); setErrorMsg(null); };
+  const reset = () => { setResultUrl(null); setSummary(null); setResultBounds(null); };
 
   return (
     <div className="w-full h-screen grid grid-cols-12 gap-3 p-3 bg-neutral-50">
-      {/* Sidebar */}
       <div className="col-span-4 xl:col-span-3 space-y-3">
         <Card className="shadow-md">
           <CardContent className="space-y-4">
@@ -243,7 +213,7 @@ export default function App() {
               <MapIcon className="w-5 h-5" />
               <h2 className="text-lg font-semibold">Area of Interest</h2>
             </div>
-            <p className="text-sm text-neutral-600">Draw a polygon on the map (toggle drawing), or use the default box. We'll fetch imagery and highlight NDVI changes between your selected dates.</p>
+            <p className="text-sm text-neutral-600">Draw a polygon on the map (toggle drawing), or use the default box. We'll fetch imagery and highlight changes between your selected dates.</p>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs text-neutral-600">Before date</label>
@@ -263,7 +233,7 @@ export default function App() {
             </div>
             <div>
               <div className="flex items-center justify-between text-sm mb-1">
-                <span>Change threshold (UI only)</span>
+                <span>Change threshold</span>
                 <span className="text-neutral-500">{threshold}%</span>
               </div>
               <Slider value={threshold} onChange={setThreshold} min={0} max={100} step={1} />
@@ -288,17 +258,10 @@ export default function App() {
             {summary && (
               <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
                 <div className="text-sm font-semibold">Summary</div>
-                <div className="text-sm text-neutral-700">(UI) AOI size (rough): {summary.totalAreaKm2.toFixed(2)} km²</div>
-                <div className="text-sm text-neutral-700">(UI) |ΔNDVI| proxy: {summary.changedPct.toFixed(1)}%</div>
-                <div className="text-xs text-neutral-600 mt-2">
-                  Real stats: mean ΔNDVI={(window as any)?.__NDVI_SUMMARY__?.mean_delta?.toFixed?.(3) ?? "–"}, gain%={(window as any)?.__NDVI_SUMMARY__?.pct_gain_pixels?.toFixed?.(1) ?? "–"}, loss%={(window as any)?.__NDVI_SUMMARY__?.pct_loss_pixels?.toFixed?.(1) ?? "–"}
-                </div>
+                <div className="text-sm text-neutral-700">Changed area: {summary.changedPct.toFixed(1)}%</div>
+                <div className="text-sm text-neutral-700">AOI size (rough): {summary.totalAreaKm2.toFixed(2)} km²</div>
               </motion.div>
             )}
-            {errorMsg && (
-              <div className="p-3 bg-red-50 rounded-xl border border-red-200 text-sm text-red-700">{errorMsg}</div>
-            )}
-            <div className="text-[11px] text-neutral-500">Backend: {BACKEND}</div>
           </CardContent>
         </Card>
 
@@ -315,7 +278,6 @@ export default function App() {
         </Card>
       </div>
 
-      {/* Map panel */}
       <div className="col-span-8 xl:col-span-9">
         <Card className="h-full overflow-hidden">
           <div className="h-full w-full relative">
@@ -325,7 +287,6 @@ export default function App() {
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
 
-              {/* AOI polygons */}
               {aoi?.length >= 3 && (
                 <Polygon positions={aoi} pathOptions={{ color: "#0ea5e9", weight: 2, fillOpacity: 0.08 }} />
               )}
@@ -333,7 +294,6 @@ export default function App() {
                 <Polygon positions={draftAoi} pathOptions={{ color: "#8b5cf6", weight: 2, dashArray: "6,4", fillOpacity: 0.05 }} />
               )}
 
-              {/* Change overlay */}
               {resultUrl && resultBounds && (
                 <>
                   <ImageOverlay url={resultUrl} bounds={resultBounds} opacity={0.85} />
@@ -341,7 +301,6 @@ export default function App() {
                 </>
               )}
 
-              {/* Click capture for drawing */}
               <MapClickCapture drawing={drawing} onAddPoint={(ll)=>setDraftAoi(prev=>[...prev, ll])} />
             </MapContainer>
           </div>

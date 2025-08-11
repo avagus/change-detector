@@ -63,7 +63,7 @@ type Bounds = [[number, number], [number, number]];
 const SAFE_CENTER: LatLng = [34.05, -118.25]; // Fallback center (Los Angeles)
 
 // Backend base URL (set VITE_BACKEND_URL in your env for production)
-const BACKEND: string = (import.meta as any)?.env?.VITE_BACKEND_URL || "http://localhost:8080";
+const BACKEND =  import.meta.env.VITE_BACKEND_URL;
 
 // =====================
 // Helpers
